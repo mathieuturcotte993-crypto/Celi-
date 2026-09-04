@@ -80,3 +80,30 @@ export function estimateTaxSavings(deposit, marginalRate) {
   if (!deposit || !marginalRate) return 0;
   return (deposit * marginalRate) / 100;
 }
+
+/* ══════════════════════════════════════════════════════════════════ */
+/*  Périodes d'affichage de l'historique                               */
+/* ══════════════════════════════════════════════════════════════════ */
+export const HISTORY_PERIODS = [
+  { value: "jour", label: "Jour" },
+  { value: "semaine", label: "Semaine" },
+  { value: "mois", label: "Mois" },
+  { value: "ytd", label: "Cette année" },
+  { value: "tout", label: "Années" },
+];
+
+/** Filtre un historique [{ t, monthly, total }, …] selon la période choisie. */
+export function filterHistory(history, period) {
+  if (!history?.length) return [];
+  const now = Date.now();
+  const DAY = 86_400_000;
+  let cutoff = 0;
+  if (period === "jour") cutoff = now - DAY;
+  else if (period === "semaine") cutoff = now - 7 * DAY;
+  else if (period === "mois") cutoff = now - 30 * DAY;
+  else if (period === "ytd") cutoff = new Date(new Date().getFullYear(), 0, 1).getTime();
+  // "tout" : pas de filtre
+  const filtered = period === "tout" ? history : history.filter((h) => h.t >= cutoff);
+  // garde toujours au moins le dernier point pour donner un repère récent
+  return filtered.length ? filtered : history.slice(-1);
+}
