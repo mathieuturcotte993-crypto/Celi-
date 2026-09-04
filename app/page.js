@@ -3,13 +3,17 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { C, SANS, MONO, ACCOUNT_ACCENTS } from "./lib/theme";
 import { ACCOUNTS, ACCOUNT_ORDER } from "./lib/accounts";
-import { fr, money, pct, valueOf, allocate, parsePaste, estimateTaxSavings } from "./lib/portfolio";
+import { fr, money, pct, valueOf, allocate, parsePaste, estimateTaxSavings, filterHistory, HISTORY_PERIODS } from "./lib/portfolio";
 import { usePortfolio } from "./hooks/usePortfolio";
-import { GapBar, Stat, Segmented, Card, Badge, ToastStack } from "./components/ui";
+import { GapBar, Stat, Segmented, Card, ToastStack } from "./components/ui";
 import Donut, { DonutLegend } from "./components/Donut";
 import Sparkline from "./components/Sparkline";
 
 const MODEL = "claude-sonnet-5";
+
+/* Sélectionne tout le contenu au focus : évite d'avoir à effacer le 0    */
+/* existant avant de taper une nouvelle valeur dans un champ numérique.   */
+const selectOnFocus = (e) => e.target.select();
 
 /* ══════════════════════════════════════════════════════════════════ */
 /*  Racine — gère les deux comptes et la vue combinée                  */
@@ -97,7 +101,15 @@ function GlobalStyle() {
       .busy{animation:pulse 1.1s ease-in-out infinite}
       @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
       ::selection{background:${C.accentSoft}}
-      @media (max-width:560px){.hide-mobile{display:none!important}.stack-mobile{grid-template-columns:1fr!important}}
+      .manual-field-label{display:none}
+      @media (max-width:560px){
+        .hide-mobile{display:none!important}
+        .stack-mobile{grid-template-columns:1fr!important}
+        .manual-header{display:none!important}
+        .manual-row{grid-template-columns:1fr 1fr!important;row-gap:8px!important}
+        .manual-ticker{grid-column:1/-1;font-size:14px!important}
+        .manual-field-label{display:block;font-size:10px;color:${C.faint};margin-bottom:3px}
+      }
     `}</style>
   );
 }
@@ -106,6 +118,7 @@ function GlobalStyle() {
 /*  Vue combinée — lecture seule, agrège CELI + REER                   */
 /* ══════════════════════════════════════════════════════════════════ */
 function EnsembleView({ celi, reer, combinedTotal, combinedMonthly, combinedBlended }) {
+  const [histPeriod, setHistPeriod] = useState("mois");
   const regionSlices = useMemo(() => {
     const all = [...celi.lines, ...reer.lines];
     const byRegion = {};
@@ -120,17 +133,21 @@ function EnsembleView({ celi, reer, combinedTotal, combinedMonthly, combinedBlen
   ];
 
   const historyCombined = useMemo(() => {
-    // aligne les deux historiques par index (approximatif mais suffisant pour une tendance)
-    const n = Math.max(celi.history.length, reer.history.length);
+    // filtre chaque compte selon la période choisie, puis aligne par index
+    // (approximatif — les deux comptes ne sont pas forcément mis à jour aux
+    // mêmes instants — mais suffisant pour donner une tendance).
+    const c = filterHistory(celi.history, histPeriod);
+    const r = filterHistory(reer.history, histPeriod);
+    const n = Math.max(c.length, r.length);
+    if (n < 2) return null;
     const pts = [];
     for (let i = 0; i < n; i++) {
-      const c = celi.history[celi.history.length - n + i];
-      const r = reer.history[reer.history.length - n + i];
-      if (!c && !r) continue;
-      pts.push({ v: (c?.monthly || (i === 0 ? 0 : pts.at(-1)?.v * (celi.totals.total / combinedTotal || 1))) + (r?.monthly || 0) });
+      const cv = c[c.length - n + i]?.monthly ?? c[c.length - 1]?.monthly ?? 0;
+      const rv = r[r.length - n + i]?.monthly ?? r[r.length - 1]?.monthly ?? 0;
+      pts.push({ v: cv + rv });
     }
-    return pts.length >= 2 ? pts : null;
-  }, [celi.history, reer.history]);
+    return pts;
+  }, [celi.history, reer.history, histPeriod]);
 
   return (
     <>
@@ -160,7 +177,13 @@ function EnsembleView({ celi, reer, combinedTotal, combinedMonthly, combinedBlen
       </div>
 
       <Card style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 10 }}>Évolution du revenu mensuel combiné</div>
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          marginBottom: 14, gap: 10, flexWrap: "wrap",
+        }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600 }}>Évolution du revenu mensuel combiné</div>
+          <Segmented size="sm" value={histPeriod} onChange={setHistPeriod} options={HISTORY_PERIODS} />
+        </div>
         <Sparkline points={historyCombined} color={C.ink} />
       </Card>
 
@@ -177,6 +200,7 @@ function EnsembleView({ celi, reer, combinedTotal, combinedMonthly, combinedBlen
 function AccountView({ accountId, portfolio: p, accent, pushToast }) {
   const cfg = ACCOUNTS[accountId];
   const [tab, setTab] = useState("apercu");
+  const [histPeriod, setHistPeriod] = useState("mois");
   const [paste, setPaste] = useState("");
   const [imgPreview, setImgPreview] = useState(null);
   const [busy, setBusy] = useState(null);
@@ -216,8 +240,8 @@ function AccountView({ accountId, portfolio: p, accent, pushToast }) {
   );
 
   const historyPoints = useMemo(
-    () => p.history.map((h) => ({ v: h.monthly })),
-    [p.history]
+    () => filterHistory(p.history, histPeriod).map((h) => ({ v: h.monthly })),
+    [p.history, histPeriod]
   );
 
   const applyPaste = () => {
@@ -395,9 +419,12 @@ function AccountView({ accountId, portfolio: p, accent, pushToast }) {
           </div>
 
           <Card>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              marginBottom: 14, gap: 10, flexWrap: "wrap",
+            }}>
               <div style={{ fontSize: 12.5, fontWeight: 600 }}>Évolution du revenu mensuel</div>
-              {p.history.length > 0 && <Badge>{p.history.length} point{p.history.length > 1 ? "s" : ""}</Badge>}
+              <Segmented size="sm" value={histPeriod} onChange={setHistPeriod} options={HISTORY_PERIODS} />
             </div>
             <Sparkline points={historyPoints.length >= 2 ? historyPoints : null} color={accent.accent} />
           </Card>
@@ -410,13 +437,13 @@ function AccountView({ accountId, portfolio: p, accent, pushToast }) {
           <Card style={{ marginBottom: 14 }}>
             <div style={S.label}>Combien tu déposes</div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-              <input type="number" value={p.deposit}
+              <input type="number" value={p.deposit} onFocus={selectOnFocus}
                 onChange={(e) => p.setDeposit(parseFloat(e.target.value) || 0)}
                 style={{ ...S.input, fontSize: 32, fontWeight: 500, padding: "5px 10px", width: 172 }} />
               <span style={{ fontSize: 25, color: C.faint }}>$</span>
               <div style={{ marginLeft: "auto", textAlign: "right" }}>
                 <div style={S.label}>minimum par ligne</div>
-                <input type="number" value={p.minLot}
+                <input type="number" value={p.minLot} onFocus={selectOnFocus}
                   onChange={(e) => p.setMinLot(parseFloat(e.target.value) || 0)}
                   style={{ ...S.input, width: 74, padding: "4px 7px", marginTop: 3, textAlign: "right" }} />
               </div>
@@ -478,7 +505,8 @@ function AccountView({ accountId, portfolio: p, accent, pushToast }) {
             </div>
             {p.lines.length === 0 && <EmptyNote text="Aucune position. Va dans « Mettre à jour » pour importer tes titres." />}
             {ordered.map((l, i) => {
-              const d = l.actual - l.target;
+              const d = l.actual - l.target; // écart en points, utilisé seulement pour la couleur
+              const dollarGap = l.value - (l.target / 100) * total; // même écart, en dollars
               return (
                 <div key={l.ticker} style={{
                   padding: "14px 0",
@@ -500,7 +528,7 @@ function AccountView({ accountId, portfolio: p, accent, pushToast }) {
                       {fr(l.shares, 4)} parts × {money(l.price)} · {pct(l.yield)} rend.
                     </span>
                     <span style={{ ...S.num, color: Math.abs(d) < 1 ? C.faint : d > 0 ? C.over : C.under }}>
-                      {d > 0 ? "+" : ""}{fr(d, 1)} pts
+                      {dollarGap > 0 ? "+" : ""}{money(dollarGap)} vs cible
                     </span>
                   </div>
                 </div>
@@ -562,30 +590,42 @@ function AccountView({ accountId, portfolio: p, accent, pushToast }) {
 
           <Card>
             <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 14 }}>Ajuster à la main</div>
-            <div style={{
+            <div className="manual-header" style={{
               display: "grid", gridTemplateColumns: "1fr 78px 74px 56px 56px",
               gap: 7, ...S.label, marginBottom: 6,
             }}>
               <span /><span>parts</span><span>prix</span><span>cible</span><span>rend.</span>
             </div>
             {p.lines.map((l) => (
-              <div key={l.ticker} style={{
+              <div key={l.ticker} className="manual-row" style={{
                 display: "grid", gridTemplateColumns: "1fr 78px 74px 56px 56px", gap: 7,
-                alignItems: "center", padding: "6px 0", borderTop: `1px solid ${C.rule}`,
+                alignItems: "center", padding: "8px 0", borderTop: `1px solid ${C.rule}`,
               }}>
-                <span style={{ fontSize: 13.5, fontWeight: 500 }}>{l.ticker}</span>
-                <input type="number" step="0.0001" value={l.shares} aria-label={`Parts ${l.ticker}`}
-                  onChange={(e) => p.setLine(l.ticker, { shares: parseFloat(e.target.value) || 0 })}
-                  style={{ ...S.input, fontSize: 12, padding: "5px 6px" }} />
-                <input type="number" step="0.01" value={l.price} aria-label={`Prix ${l.ticker}`}
-                  onChange={(e) => p.setLine(l.ticker, { price: parseFloat(e.target.value) || 0 })}
-                  style={{ ...S.input, fontSize: 12, padding: "5px 6px" }} />
-                <input type="number" value={l.target} aria-label={`Cible ${l.ticker}`}
-                  onChange={(e) => p.setLine(l.ticker, { target: parseFloat(e.target.value) || 0 })}
-                  style={{ ...S.input, fontSize: 12, padding: "5px 6px" }} />
-                <input type="number" step="0.1" value={l.yield} aria-label={`Rendement ${l.ticker}`}
-                  onChange={(e) => p.setLine(l.ticker, { yield: parseFloat(e.target.value) || 0 })}
-                  style={{ ...S.input, fontSize: 12, padding: "5px 6px" }} />
+                <span className="manual-ticker" style={{ fontSize: 13.5, fontWeight: 500 }}>{l.ticker}</span>
+                <label className="manual-field">
+                  <span className="manual-field-label">parts</span>
+                  <input type="number" step="0.0001" value={l.shares} aria-label={`Parts ${l.ticker}`} onFocus={selectOnFocus}
+                    onChange={(e) => p.setLine(l.ticker, { shares: parseFloat(e.target.value) || 0 })}
+                    style={{ ...S.input, fontSize: 12, padding: "5px 6px" }} />
+                </label>
+                <label className="manual-field">
+                  <span className="manual-field-label">prix</span>
+                  <input type="number" step="0.01" value={l.price} aria-label={`Prix ${l.ticker}`} onFocus={selectOnFocus}
+                    onChange={(e) => p.setLine(l.ticker, { price: parseFloat(e.target.value) || 0 })}
+                    style={{ ...S.input, fontSize: 12, padding: "5px 6px" }} />
+                </label>
+                <label className="manual-field">
+                  <span className="manual-field-label">cible</span>
+                  <input type="number" value={l.target} aria-label={`Cible ${l.ticker}`} onFocus={selectOnFocus}
+                    onChange={(e) => p.setLine(l.ticker, { target: parseFloat(e.target.value) || 0 })}
+                    style={{ ...S.input, fontSize: 12, padding: "5px 6px" }} />
+                </label>
+                <label className="manual-field">
+                  <span className="manual-field-label">rend.</span>
+                  <input type="number" step="0.1" value={l.yield} aria-label={`Rendement ${l.ticker}`} onFocus={selectOnFocus}
+                    onChange={(e) => p.setLine(l.ticker, { yield: parseFloat(e.target.value) || 0 })}
+                    style={{ ...S.input, fontSize: 12, padding: "5px 6px" }} />
+                </label>
               </div>
             ))}
             {p.lines.length === 0 && <EmptyNote text="Importe une capture ou colle du texte ci-dessus pour commencer." />}
@@ -603,7 +643,7 @@ function ReerFields({ p, taxSavings }) {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <label>
           <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Droits de cotisation restants</div>
-          <input type="number" value={p.extra?.contribRoom ?? 0}
+          <input type="number" value={p.extra?.contribRoom ?? 0} onFocus={selectOnFocus}
             onChange={(e) => p.setExtra({ contribRoom: parseFloat(e.target.value) || 0 })}
             style={{
               fontFamily: MONO, border: `1px solid ${C.rule}`, borderRadius: 8,
@@ -612,7 +652,7 @@ function ReerFields({ p, taxSavings }) {
         </label>
         <label>
           <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Taux marginal (%)</div>
-          <input type="number" value={p.extra?.marginalRate ?? 37}
+          <input type="number" value={p.extra?.marginalRate ?? 37} onFocus={selectOnFocus}
             onChange={(e) => p.setExtra({ marginalRate: parseFloat(e.target.value) || 0 })}
             style={{
               fontFamily: MONO, border: `1px solid ${C.rule}`, borderRadius: 8,
